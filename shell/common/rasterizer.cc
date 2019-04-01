@@ -4,6 +4,8 @@
 
 #include "flutter/shell/common/rasterizer.h"
 
+#include "flutter/shell/common/persistent_cache.h"
+
 #include <utility>
 
 #include "third_party/skia/include/core/SkEncodedImageFormat.h"
@@ -150,8 +152,18 @@ void Rasterizer::DoDraw(std::unique_ptr<flow::LayerTree> layer_tree) {
     return;
   }
 
+  PersistentCache* persistent_cache = PersistentCache::GetCacheForProcess();
+  persistent_cache->ResetStoredNewShaders();
+
   if (DrawToSurface(*layer_tree)) {
     last_layer_tree_ = std::move(layer_tree);
+  }
+
+  if (persistent_cache->IsDumpingSkp() &&
+      persistent_cache->StoredNewShaders()) {
+    auto screenshot =
+        ScreenshotLastLayerTree(ScreenshotType::SkiaPicture, false);
+    persistent_cache->DumpSkp(*screenshot.data);
   }
 }
 
@@ -180,10 +192,6 @@ bool Rasterizer::DrawToSurface(flow::LayerTree& layer_tree) {
   auto compositor_frame = compositor_context_->AcquireFrame(
       surface_->GetContext(), canvas, external_view_embedder,
       surface_->GetRootTransformation(), true);
-
-  if (canvas) {
-    canvas->clear(SK_ColorTRANSPARENT);
-  }
 
   if (compositor_frame && compositor_frame->Raster(layer_tree, false)) {
     frame->Submit();

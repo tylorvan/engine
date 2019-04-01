@@ -6,6 +6,7 @@ package io.flutter.view;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
 import android.app.AlarmManager;
@@ -59,6 +60,7 @@ public class FlutterMain {
     private static final String DEFAULT_AOT_ISOLATE_SNAPSHOT_DATA = "isolate_snapshot_data";
     private static final String DEFAULT_AOT_ISOLATE_SNAPSHOT_INSTR = "isolate_snapshot_instr";
     private static final String DEFAULT_FLX = "app.flx";
+    private static final String DEFAULT_LIBRARY = "libflutter.so";
     private static final String DEFAULT_KERNEL_BLOB = "kernel_blob.bin";
     private static final String DEFAULT_FLUTTER_ASSETS_DIR = "flutter_assets";
 
@@ -153,7 +155,18 @@ public class FlutterMain {
         initConfig(applicationContext);
         initAot(applicationContext);
         initResources(applicationContext);
-        System.loadLibrary("flutter");
+
+        if (sResourceUpdater == null) {
+            System.loadLibrary("flutter");
+        } else {
+            sResourceExtractor.waitForCompletion();
+            File lib = new File(PathUtils.getDataDirectory(applicationContext), DEFAULT_LIBRARY);
+            if (lib.exists()) {
+                System.load(lib.getAbsolutePath());
+            } else {
+                System.loadLibrary("flutter");
+            }
+        }
 
         // We record the initialization time using SystemClock because at the start of the
         // initialization we have not yet loaded the native library to call into dart_tools_api.h.
@@ -183,7 +196,12 @@ public class FlutterMain {
             sResourceExtractor.waitForCompletion();
 
             List<String> shellArgs = new ArrayList<>();
+
             shellArgs.add("--icu-symbol-prefix=_binary_icudtl_dat");
+            ApplicationInfo applicationInfo = applicationContext.getPackageManager().getApplicationInfo(
+                applicationContext.getPackageName(), PackageManager.GET_META_DATA);
+            shellArgs.add("--icu-native-lib-path=" + applicationInfo.nativeLibraryDir + File.separator + DEFAULT_LIBRARY);
+
             if (args != null) {
                 Collections.addAll(shellArgs, args);
             }
@@ -297,6 +315,11 @@ public class FlutterMain {
             .addResource(sAotVmSnapshotInstr)
             .addResource(sAotIsolateSnapshotData)
             .addResource(sAotIsolateSnapshotInstr);
+        }
+
+        if (sResourceUpdater != null) {
+          sResourceExtractor
+            .addResource(DEFAULT_LIBRARY);
         }
 
         sResourceExtractor.start();

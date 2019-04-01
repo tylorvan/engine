@@ -4,6 +4,8 @@
 
 package io.flutter.view;
 
+import static java.util.Arrays.asList;
+
 import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -16,6 +18,7 @@ import io.flutter.util.PathUtils;
 import org.json.JSONObject;
 
 import java.io.*;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.concurrent.CancellationException;
@@ -30,10 +33,12 @@ import java.util.zip.ZipFile;
 class ResourceExtractor {
     private static final String TAG = "ResourceExtractor";
     private static final String TIMESTAMP_PREFIX = "res_timestamp-";
+    private static final String[] SUPPORTED_ABIS = getSupportedAbis();
 
     @SuppressWarnings("deprecation")
     static long getVersionCode(PackageInfo packageInfo) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        // Linter needs P (28) hardcoded or else it will fail these lines.
+        if (Build.VERSION.SDK_INT >= 28) {
             return packageInfo.getLongVersionCode();
         } else {
             return packageInfo.versionCode;
@@ -179,6 +184,7 @@ class ResourceExtractor {
 
         for (String asset : mResources) {
             try {
+                final String resource = "assets/" + asset;
                 final File output = new File(dataDir, asset);
                 if (output.exists()) {
                     continue;
@@ -192,7 +198,7 @@ class ResourceExtractor {
                     copy(is, os);
                 }
 
-                Log.i(TAG, "Extracted baseline resource " + asset);
+                Log.i(TAG, "Extracted baseline resource " + resource);
 
             } catch (FileNotFoundException fnfe) {
                 continue;
@@ -239,13 +245,33 @@ class ResourceExtractor {
         }
 
         for (String asset : mResources) {
-            boolean useDiff = false;
-            ZipEntry entry = zipFile.getEntry(asset);
+            String resource = null;
+            ZipEntry entry = null;
+            if (asset.endsWith(".so")) {
+                // Replicate library lookup logic.
+                for (String abi : SUPPORTED_ABIS) {
+                    resource = "lib/" + abi + "/" + asset;
+                    entry = zipFile.getEntry(resource);
+                    if (entry == null) {
+                        entry = zipFile.getEntry(resource + ".bzdiff40");
+                        if (entry == null) {
+                            continue;
+                        }
+                    }
+
+                    // Stop after the first match.
+                    break;
+                }
+            }
+
             if (entry == null) {
-                useDiff = true;
-                entry = zipFile.getEntry(asset + ".bzdiff40");
+                resource = "assets/" + asset;
+                entry = zipFile.getEntry(resource);
                 if (entry == null) {
-                    continue;
+                    entry = zipFile.getEntry(resource + ".bzdiff40");
+                    if (entry == null) {
+                        continue;
+                    }
                 }
             }
 
@@ -258,15 +284,34 @@ class ResourceExtractor {
             }
 
             try {
-                if (useDiff) {
+                if (entry.getName().endsWith(".bzdiff40")) {
                     ByteArrayOutputStream diff = new ByteArrayOutputStream();
                     try (InputStream is = zipFile.getInputStream(entry)) {
                         copy(is, diff);
                     }
 
                     ByteArrayOutputStream orig = new ByteArrayOutputStream();
-                    try (InputStream is = manager.open(asset)) {
-                        copy(is, orig);
+                    if (asset.endsWith(".so")) {
+                        ZipFile apkFile = new ZipFile(getAPKPath());
+                        if (apkFile == null) {
+                            throw new IOException("Could not find APK");
+                        }
+
+                        ZipEntry origEntry = apkFile.getEntry(resource);
+                        if (origEntry == null) {
+                            throw new IOException("Could not find APK resource " + resource);
+                        }
+
+                        try (InputStream is = apkFile.getInputStream(origEntry)) {
+                            copy(is, orig);
+                        }
+
+                    } else {
+                        try (InputStream is = manager.open(asset)) {
+                            copy(is, orig);
+                        } catch (FileNotFoundException e) {
+                            throw new IOException("Could not find APK resource " + resource);
+                        }
                     }
 
                     try (OutputStream os = new FileOutputStream(output)) {
@@ -280,7 +325,7 @@ class ResourceExtractor {
                     }
                 }
 
-                Log.i(TAG, "Extracted override resource " + asset);
+                Log.i(TAG, "Extracted override resource " + entry.getName());
 
             } catch (FileNotFoundException fnfe) {
                 continue;
@@ -352,6 +397,26 @@ class ResourceExtractor {
         byte[] buf = new byte[16 * 1024];
         for (int i; (i = in.read(buf)) >= 0; ) {
             out.write(buf, 0, i);
+        }
+    }
+
+    private String getAPKPath() {
+        try {
+            return mContext.getPackageManager().getApplicationInfo(
+                mContext.getPackageName(), 0).publicSourceDir;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static String[] getSupportedAbis() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            return Build.SUPPORTED_ABIS;
+        } else {
+            ArrayList<String> cpuAbis = new ArrayList<String>(asList(Build.CPU_ABI, Build.CPU_ABI2));
+            cpuAbis.removeAll(asList(null, ""));
+            return cpuAbis.toArray(new String[0]);
         }
     }
 }

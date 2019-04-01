@@ -12,6 +12,7 @@
 #include "flutter/fml/synchronization/waitable_event.h"
 #include "flutter/fml/trace_event.h"
 #include "flutter/shell/common/io_manager.h"
+#include "flutter/shell/gpu/gpu_surface_gl_delegate.h"
 #include "flutter/shell/platform/darwin/ios/framework/Source/FlutterViewController_Internal.h"
 #include "flutter/shell/platform/darwin/ios/framework/Source/vsync_waiter_ios.h"
 #include "flutter/shell/platform/darwin/ios/ios_external_texture_gl.h"
@@ -49,7 +50,8 @@ void PlatformViewIOS::SetOwnerViewController(fml::WeakPtr<FlutterViewController>
 
     if (accessibility_bridge_) {
       accessibility_bridge_.reset(
-          new AccessibilityBridge(static_cast<FlutterView*>(owner_controller_.get().view), this));
+          new AccessibilityBridge(static_cast<FlutterView*>(owner_controller_.get().view), this,
+                                  [owner_controller.get() platformViewsController]));
     }
     // Do not call `NotifyCreated()` here - let FlutterViewController take care
     // of that when its Viewport is sized.  If `NotifyCreated()` is called here,
@@ -82,19 +84,21 @@ sk_sp<GrContext> PlatformViewIOS::CreateResourceContext() const {
     return nullptr;
   }
 
-  return IOManager::CreateCompatibleResourceLoadingContext(GrBackend::kOpenGL_GrBackend);
+  return IOManager::CreateCompatibleResourceLoadingContext(
+      GrBackend::kOpenGL_GrBackend, GPUSurfaceGLDelegate::GetDefaultPlatformGLInterface());
 }
 
 // |shell::PlatformView|
 void PlatformViewIOS::SetSemanticsEnabled(bool enabled) {
   if (!owner_controller_) {
-    FML_DLOG(WARNING) << "Could not set semantics to enabled, this "
-                         "PlatformViewIOS has no ViewController.";
+    FML_LOG(WARNING) << "Could not set semantics to enabled, this "
+                        "PlatformViewIOS has no ViewController.";
     return;
   }
   if (enabled && !accessibility_bridge_) {
     accessibility_bridge_ = std::make_unique<AccessibilityBridge>(
-        static_cast<FlutterView*>(owner_controller_.get().view), this);
+        static_cast<FlutterView*>(owner_controller_.get().view), this,
+        [owner_controller_.get() platformViewsController]);
   } else if (!enabled && accessibility_bridge_) {
     accessibility_bridge_.reset();
   }
@@ -109,8 +113,11 @@ void PlatformViewIOS::SetAccessibilityFeatures(int32_t flags) {
 // |shell::PlatformView|
 void PlatformViewIOS::UpdateSemantics(blink::SemanticsNodeUpdates update,
                                       blink::CustomAccessibilityActionUpdates actions) {
+  FML_DCHECK(owner_controller_);
   if (accessibility_bridge_) {
     accessibility_bridge_->UpdateSemantics(std::move(update), std::move(actions));
+    [[NSNotificationCenter defaultCenter] postNotificationName:FlutterSemanticsUpdateNotification
+                                                        object:owner_controller_.get()];
   }
 }
 

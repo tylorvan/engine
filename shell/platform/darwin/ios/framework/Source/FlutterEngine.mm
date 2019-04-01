@@ -10,6 +10,7 @@
 
 #include "flutter/fml/message_loop.h"
 #include "flutter/fml/platform/darwin/platform_version.h"
+#include "flutter/fml/trace_event.h"
 #include "flutter/shell/common/engine.h"
 #include "flutter/shell/common/platform_view.h"
 #include "flutter/shell/common/shell.h"
@@ -60,6 +61,8 @@
   fml::scoped_nsobject<FlutterBasicMessageChannel> _settingsChannel;
 
   int64_t _nextTextureId;
+
+  uint64_t _nextPointerFlowId;
 
   BOOL _allowHeadlessExecution;
 }
@@ -117,12 +120,15 @@
 }
 
 - (void)dispatchPointerDataPacket:(std::unique_ptr<blink::PointerDataPacket>)packet {
-  self.shell.GetTaskRunners().GetUITaskRunner()->PostTask(
-      fml::MakeCopyable([engine = self.shell.GetEngine(), packet = std::move(packet)] {
+  TRACE_EVENT0("flutter", "dispatchPointerDataPacket");
+  TRACE_FLOW_BEGIN("flutter", "PointerEvent", _nextPointerFlowId);
+  self.shell.GetTaskRunners().GetUITaskRunner()->PostTask(fml::MakeCopyable(
+      [engine = self.shell.GetEngine(), packet = std::move(packet), flow_id = _nextPointerFlowId] {
         if (engine) {
-          engine->DispatchPointerDataPacket(*packet);
+          engine->DispatchPointerDataPacket(*packet, flow_id);
         }
       }));
+  _nextPointerFlowId++;
 }
 
 - (fml::WeakPtr<shell::PlatformView>)platformView {
@@ -138,6 +144,10 @@
 - (fml::RefPtr<fml::TaskRunner>)platformTaskRunner {
   FML_DCHECK(_shell);
   return _shell->GetTaskRunners().GetPlatformTaskRunner();
+}
+
+- (void)ensureSemanticsEnabled {
+  self.iosPlatformView->SetSemanticsEnabled(true);
 }
 
 - (void)setViewController:(FlutterViewController*)viewController {
@@ -345,16 +355,16 @@
     // Embedded views requires the gpu and the platform views to be the same.
     // The plan is to eventually dynamically merge the threads when there's a
     // platform view in the layer tree.
-    // For now we run in a single threaded configuration.
-    // TODO(amirh/chinmaygarde): merge only the gpu and platform threads.
-    // https://github.com/flutter/flutter/issues/23974
+    // For now we use a fixed thread configuration with the same thread used as the
+    // gpu and platform task runner.
     // TODO(amirh/chinmaygarde): remove this, and dynamically change the thread configuration.
     // https://github.com/flutter/flutter/issues/23975
+
     blink::TaskRunners task_runners(threadLabel.UTF8String,                          // label
                                     fml::MessageLoop::GetCurrent().GetTaskRunner(),  // platform
                                     fml::MessageLoop::GetCurrent().GetTaskRunner(),  // gpu
-                                    fml::MessageLoop::GetCurrent().GetTaskRunner(),  // ui
-                                    fml::MessageLoop::GetCurrent().GetTaskRunner()   // io
+                                    _threadHost.ui_thread->GetTaskRunner(),          // ui
+                                    _threadHost.io_thread->GetTaskRunner()           // io
     );
     // Create the shell. This is a blocking operation.
     _shell = shell::Shell::Create(std::move(task_runners),  // task runners

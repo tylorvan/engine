@@ -163,16 +163,16 @@ static void RecordStartupTimestamp() {
 // that cause shell initialization failures will still lead to some of their
 // settings being applied.
 static void PerformInitializationTasks(const blink::Settings& settings) {
+  {
+    fml::LogSettings log_settings;
+    log_settings.min_log_level =
+        settings.verbose_logging ? fml::LOG_INFO : fml::LOG_ERROR;
+    fml::SetLogSettings(log_settings);
+  }
+
   static std::once_flag gShellSettingsInitialization = {};
   std::call_once(gShellSettingsInitialization, [&settings] {
     RecordStartupTimestamp();
-
-    {
-      fml::LogSettings log_settings;
-      log_settings.min_log_level =
-          settings.verbose_logging ? fml::LOG_INFO : fml::LOG_ERROR;
-      fml::SetLogSettings(log_settings);
-    }
 
     tonic::SetLogHandler(
         [](const char* message) { FML_LOG(ERROR) << message; });
@@ -187,12 +187,14 @@ static void PerformInitializationTasks(const blink::Settings& settings) {
       FML_DLOG(INFO) << "Skia deterministic rendering is enabled.";
     }
 
-    if (settings.icu_data_path.size() != 0) {
-      fml::icu::InitializeICU(settings.icu_data_path);
-    } else if (settings.icu_mapper) {
-      fml::icu::InitializeICUFromMapping(settings.icu_mapper());
-    } else {
-      FML_DLOG(WARNING) << "Skipping ICU initialization in the shell.";
+    if (settings.icu_initialization_required) {
+      if (settings.icu_data_path.size() != 0) {
+        fml::icu::InitializeICU(settings.icu_data_path);
+      } else if (settings.icu_mapper) {
+        fml::icu::InitializeICUFromMapping(settings.icu_mapper());
+      } else {
+        FML_DLOG(WARNING) << "Skipping ICU initialization in the shell.";
+      }
     }
   });
 }
@@ -380,6 +382,9 @@ bool Shell::Setup(std::unique_ptr<PlatformView> platform_view,
   PersistentCache::GetCacheForProcess()->AddWorkerTaskRunner(
       task_runners_.GetIOTaskRunner());
 
+  PersistentCache::GetCacheForProcess()->SetIsDumpingSkp(
+      settings_.dump_skp_on_shader_compilation);
+
   return true;
 }
 
@@ -432,39 +437,65 @@ void Shell::OnPlatformViewCreated(std::unique_ptr<Surface> surface) {
     latch.Signal();
   });
 
+  // The normal flow exectued by this method is that the platform thread is
+  // starting the sequence and waiting on the latch. Later the UI thread posts
+  // gpu_task to the GPU thread which signals the latch. If the GPU the and
+  // platform threads are the same this results in a deadlock as the gpu_task
+  // will never be posted to the plaform/gpu thread that is blocked on a latch.
+  // To avoid the described deadlock, if the gpu and the platform threads are
+  // the same, should_post_gpu_task will be false, and then instead of posting a
+  // task to the gpu thread, the ui thread just signals the latch and the
+  // platform/gpu thread follows with executing gpu_task.
+  bool should_post_gpu_task =
+      task_runners_.GetGPUTaskRunner() != task_runners_.GetPlatformTaskRunner();
+
   auto ui_task = [engine = engine_->GetWeakPtr(),                      //
                   gpu_task_runner = task_runners_.GetGPUTaskRunner(),  //
-                  gpu_task                                             //
+                  gpu_task, should_post_gpu_task,
+                  &latch  //
   ] {
     if (engine) {
       engine->OnOutputSurfaceCreated();
     }
     // Step 2: Next, tell the GPU thread that it should create a surface for its
     // rasterizer.
-    fml::TaskRunner::RunNowOrPostTask(gpu_task_runner, gpu_task);
+    if (should_post_gpu_task) {
+      fml::TaskRunner::RunNowOrPostTask(gpu_task_runner, gpu_task);
+    } else {
+      // See comment on should_post_gpu_task, in this case we just unblock
+      // the platform thread.
+      latch.Signal();
+    }
   };
 
-  auto io_task = [io_manager = io_manager_->GetWeakPtr(),
-                  platform_view = platform_view_->GetWeakPtr(),
+  // Threading: Capture platform view by raw pointer and not the weak pointer.
+  // We are going to use the pointer on the IO thread which is not safe with a
+  // weak pointer. However, we are preventing the platform view from being
+  // collected by using a latch.
+  auto* platform_view = platform_view_.get();
+
+  FML_DCHECK(platform_view);
+
+  auto io_task = [io_manager = io_manager_->GetWeakPtr(), platform_view,
                   ui_task_runner = task_runners_.GetUITaskRunner(), ui_task] {
-    if (io_manager) {
+    if (io_manager && !io_manager->GetResourceContext()) {
       io_manager->NotifyResourceContextAvailable(
-          platform_view ? platform_view->CreateResourceContext() : nullptr);
+          platform_view->CreateResourceContext());
     }
     // Step 1: Next, post a task on the UI thread to tell the engine that it has
     // an output surface.
     fml::TaskRunner::RunNowOrPostTask(ui_task_runner, ui_task);
   };
 
-  // Step 0: If the IOManager doesn't already have a ResourceContext, tell the
-  // IO thread that the PlatformView can make one for it now.
-  // Otherwise, jump right to step 1 on the UI thread.
-  if (!io_manager_->GetResourceContext()) {
-    fml::TaskRunner::RunNowOrPostTask(task_runners_.GetIOTaskRunner(), io_task);
-  } else {
-    fml::TaskRunner::RunNowOrPostTask(task_runners_.GetUITaskRunner(), ui_task);
-  }
+  fml::TaskRunner::RunNowOrPostTask(task_runners_.GetIOTaskRunner(), io_task);
+
   latch.Wait();
+  if (!should_post_gpu_task) {
+    // See comment on should_post_gpu_task, in this case the gpu_task
+    // wasn't executed, and we just run it here as the platform thread
+    // is the GPU thread.
+    gpu_task();
+  }
 }
 
 // |shell::PlatformView::Delegate|
@@ -498,21 +529,46 @@ void Shell::OnPlatformViewDestroyed() {
     fml::TaskRunner::RunNowOrPostTask(io_task_runner, io_task);
   };
 
+  // The normal flow exectued by this method is that the platform thread is
+  // starting the sequence and waiting on the latch. Later the UI thread posts
+  // gpu_task to the GPU thread triggers signaling the latch(on the IO thread).
+  // If the GPU the and platform threads are the same this results in a deadlock
+  // as the gpu_task will never be posted to the plaform/gpu thread that is
+  // blocked on a latch.  To avoid the described deadlock, if the gpu and the
+  // platform threads are the same, should_post_gpu_task will be false, and then
+  // instead of posting a task to the gpu thread, the ui thread just signals the
+  // latch and the platform/gpu thread follows with executing gpu_task.
+  bool should_post_gpu_task =
+      task_runners_.GetGPUTaskRunner() != task_runners_.GetPlatformTaskRunner();
+
   auto ui_task = [engine = engine_->GetWeakPtr(),
-                  gpu_task_runner = task_runners_.GetGPUTaskRunner(),
-                  gpu_task]() {
+                  gpu_task_runner = task_runners_.GetGPUTaskRunner(), gpu_task,
+                  should_post_gpu_task, &latch]() {
     if (engine) {
       engine->OnOutputSurfaceDestroyed();
     }
     // Step 1: Next, tell the GPU thread that its rasterizer should suspend
     // access to the underlying surface.
-    fml::TaskRunner::RunNowOrPostTask(gpu_task_runner, gpu_task);
+    if (should_post_gpu_task) {
+      fml::TaskRunner::RunNowOrPostTask(gpu_task_runner, gpu_task);
+    } else {
+      // See comment on should_post_gpu_task, in this case we just unblock
+      // the platform thread.
+      latch.Signal();
+    }
   };
 
   // Step 0: Post a task onto the UI thread to tell the engine that its output
   // surface is about to go away.
   fml::TaskRunner::RunNowOrPostTask(task_runners_.GetUITaskRunner(), ui_task);
   latch.Wait();
+  if (!should_post_gpu_task) {
+    // See comment on should_post_gpu_task, in this case the gpu_task
+    // wasn't executed, and we just run it here as the platform thread
+    // is the GPU thread.
+    gpu_task();
+    latch.Wait();
+  }
 }
 
 // |shell::PlatformView::Delegate|

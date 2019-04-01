@@ -48,6 +48,10 @@ struct Settings {
   std::string isolate_snapshot_instr_path;  // deprecated
   MappingCallback isolate_snapshot_instr;
 
+  // Returns the Mapping to a kernel buffer which contains sources for dart:*
+  // libraries.
+  MappingCallback dart_library_sources_kernel;
+
   std::string application_library_path;
   std::string application_kernel_asset;
   std::string application_kernel_list_asset;
@@ -60,6 +64,7 @@ struct Settings {
   bool trace_skia = false;
   bool trace_startup = false;
   bool trace_systrace = false;
+  bool dump_skp_on_shader_compilation = false;
   bool endless_trace_buffer = false;
   bool enable_dart_profiling = false;
   bool disable_dart_asserts = false;
@@ -104,6 +109,12 @@ struct Settings {
   bool skia_deterministic_rendering_on_cpu = false;
   bool verbose_logging = false;
   std::string log_tag = "flutter";
+
+  // The icu_initialization_required setting does not have a corresponding
+  // switch because it is intended to be decided during build time, not runtime.
+  // Some companies apply source modification here because their build system
+  // brings its own ICU data files.
+  bool icu_initialization_required = true;
   std::string icu_data_path;
   MappingCallback icu_mapper;
 

@@ -40,7 +40,7 @@ class FontCollection : public std::enable_shared_from_this<FontCollection> {
 
   size_t GetFontManagersCount() const;
 
-  void SetDefaultFontManager(sk_sp<SkFontMgr> font_manager);
+  void SetupDefaultFontManager();
   void SetAssetFontManager(sk_sp<SkFontMgr> font_manager);
   void SetDynamicFontManager(sk_sp<SkFontMgr> font_manager);
   void SetTestFontManager(sk_sp<SkFontMgr> font_manager);
@@ -48,10 +48,6 @@ class FontCollection : public std::enable_shared_from_this<FontCollection> {
   std::shared_ptr<minikin::FontCollection> GetMinikinFontCollectionForFamilies(
       const std::vector<std::string>& font_families,
       const std::string& locale);
-
-  minikin::MinikinFont* GetMinikinFontForFamilies(
-      const std::vector<std::string>& font_families,
-      minikin::FontStyle style);
 
   // Provides a FontFamily that contains glyphs for ch. This caches previously
   // matched fonts. Also see FontCollection::DoMatchFallbackFont.

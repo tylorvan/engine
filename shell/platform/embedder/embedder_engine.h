@@ -6,12 +6,15 @@
 #define FLUTTER_SHELL_PLATFORM_EMBEDDER_EMBEDDER_ENGINE_H_
 
 #include <memory>
+#include <unordered_map>
 
 #include "flutter/fml/macros.h"
 #include "flutter/shell/common/shell.h"
 #include "flutter/shell/common/thread_host.h"
 #include "flutter/shell/platform/embedder/embedder.h"
+#include "flutter/shell/platform/embedder/embedder_engine.h"
 #include "flutter/shell/platform/embedder/embedder_external_texture_gl.h"
+#include "flutter/shell/platform/embedder/embedder_thread_host.h"
 
 namespace shell {
 
@@ -19,7 +22,7 @@ namespace shell {
 // instance of the Flutter engine.
 class EmbedderEngine {
  public:
-  EmbedderEngine(ThreadHost thread_host,
+  EmbedderEngine(std::unique_ptr<EmbedderThreadHost> thread_host,
                  blink::TaskRunners task_runners,
                  blink::Settings settings,
                  Shell::CreateCallback<PlatformView> on_create_platform_view,
@@ -50,8 +53,24 @@ class EmbedderEngine {
 
   bool MarkTextureFrameAvailable(int64_t texture);
 
+  bool SetSemanticsEnabled(bool enabled);
+
+  bool SetAccessibilityFeatures(int32_t flags);
+
+  bool DispatchSemanticsAction(int id,
+                               blink::SemanticsAction action,
+                               std::vector<uint8_t> args);
+
+  bool OnVsyncEvent(intptr_t baton,
+                    fml::TimePoint frame_start_time,
+                    fml::TimePoint frame_target_time);
+
+  bool PostRenderThreadTask(fml::closure task);
+
+  bool RunTask(const FlutterTask* task);
+
  private:
-  const ThreadHost thread_host_;
+  const std::unique_ptr<EmbedderThreadHost> thread_host_;
   std::unique_ptr<Shell> shell_;
   const EmbedderExternalTextureGL::ExternalTextureCallback
       external_texture_callback_;
